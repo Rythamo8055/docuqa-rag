@@ -38,12 +38,18 @@ Thumbs.db
 # ChromaDB
 chroma_db/
 
-# Data files
+# Data files (except .gitkeep)
+!data/
+!data/.gitkeep
 *.pdf
 *.doc
 *.docx
 *.txt
-data/
+
+# Python project files (except requirements.txt)
+!requirements.txt
+*.egg-info/
+MANIFEST
 
 # Testing
 .pytest_cache/
