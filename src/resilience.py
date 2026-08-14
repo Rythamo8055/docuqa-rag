@@ -125,6 +125,20 @@ class CircuitBreaker:
             self._failures = 0
             self._state = "CLOSED"
 
+    def record_success(self) -> None:
+        """Record a successful LLM call — reset failure count, close circuit."""
+        with self._lock:
+            self._failures = 0
+            self._state = "CLOSED"
+
+    def record_failure(self) -> None:
+        """Record a failed LLM call — increment failures, open circuit if threshold reached."""
+        with self._lock:
+            self._failures += 1
+            if self._failures >= self.failure_threshold:
+                self._state = "OPEN"
+                self._opened_at = time.monotonic()
+
 
 def safe_llm_call(
     router: Any,
