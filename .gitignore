@@ -42,13 +42,22 @@ chroma_db_test/
 # Semantic cache (SQLite)
 .cache/
 
-# Data files (except .gitkeep)
+# Data files (except .gitkeep + sample PDFs so eval works on fresh clones)
 !data/
 !data/.gitkeep
 *.pdf
+!data/sample.pdf
+!data/acme_manual.pdf
 *.doc
 *.docx
 *.txt
+
+# Test / eval artifacts
+.tmp_*
+
+# Node (Next.js frontend)
+frontend/node_modules/
+frontend/.next/
 
 # Python project files (except requirements.txt)
 !requirements.txt
@@ -66,3 +75,8 @@ htmlcov/
 # Logs
 *.log
 logs/
+
+# Secrets (never commit)
+.env
+.env.*
+!*.env.example

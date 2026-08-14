@@ -85,9 +85,14 @@ def recursive_split(
     return chunks
 
 
-def extract_pdf_text(pdf_path: str) -> Dict[str, Any]:
+def extract_pdf_text(pdf_path: str, max_pages: int = 400) -> Dict[str, Any]:
     """
     Extract text from a PDF file, preserving page numbers.
+
+    Args:
+        pdf_path: path to the PDF file
+        max_pages: safety cap — stops reading after this many pages
+                   (defends against decompression-bomb / huge PDFs)
 
     Returns: {"total_pages": int, "pages": {1: "...", 2: "...", ...}}
     """
@@ -98,6 +103,8 @@ def extract_pdf_text(pdf_path: str) -> Dict[str, Any]:
     reader = PdfReader(str(pdf_path))
     pages = {}
     for i, page in enumerate(reader.pages, start=1):
+        if i > max_pages:
+            break
         try:
             pages[i] = page.extract_text() or ""
         except Exception as e:
@@ -166,11 +173,16 @@ def parent_child_chunking(
     }
 
 
-def process_pdf(pdf_path: str) -> Dict[str, Any]:
+def process_pdf(pdf_path: str, max_pages: int = 400) -> Dict[str, Any]:
     """
     Full ingestion pipeline: extract text → parent-child chunking.
 
+    Args:
+        pdf_path: path to the PDF file
+        max_pages: safety cap on pages processed (guards against
+                   decompression-bomb / giant PDFs)
+
     Returns the parent_child_chunking result dict.
     """
-    extraction = extract_pdf_text(pdf_path)
+    extraction = extract_pdf_text(pdf_path, max_pages=max_pages)
     return parent_child_chunking(extraction["pages"])

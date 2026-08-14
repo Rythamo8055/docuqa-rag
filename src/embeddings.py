@@ -172,3 +172,36 @@ class ChromaVectorStore:
             logger.info("Cleared all documents from vector store")
         except Exception as e:
             logger.debug(f"Nothing to clear or error: {e}")
+
+    def load_all(self) -> List[Dict]:
+        """
+        Rehydrate every stored chunk (text + metadata) from disk.
+
+        Used to rebuild in-memory structures (BM25 index) after a process
+        restart, so a persisted index survives server restarts/deploys.
+        Returns an empty list when nothing is stored.
+        """
+        try:
+            count = self.collection.count()
+            if count == 0:
+                return []
+            data = self.collection.get(
+                include=["documents", "metadatas"],
+                limit=count,
+            )
+        except Exception as e:
+            logger.warning(f"load_all failed: {e}")
+            return []
+
+        chunks = []
+        for doc, meta in zip(data.get("documents", []), data.get("metadatas", [])):
+            if meta is None:
+                continue
+            chunks.append({
+                "text": doc,
+                "page": meta.get("page", 1),
+                "chunk_id": meta.get("chunk_id", 0),
+                "parent_id": meta.get("parent_id", 0),
+                "tokens": meta.get("tokens", 0),
+            })
+        return chunks

@@ -1,15 +1,15 @@
 """
 Intelligent Document Q&A System with Retrieval-Augmented Generation (RAG).
 
-Pipeline: PDF upload → pypdf extraction → parent-child chunking →
-MiniLM embeddings → ChromaDB → hybrid search (BM25+RRF) →
-cross-encoder rerank → grounded LLM (router) → cited answer.
+Pipeline: PDF upload → secure validation → pypdf extraction → parent-child
+chunking → MiniLM embeddings → ChromaDB → hybrid search (BM25+RRF) →
+cross-encoder rerank → grounded LLM (router) → output guardrails → cited answer.
 
-Additive optimizations (all optional, all degrade gracefully):
-- Semantic cache (SQLite, embedding-based)
-- Cross-encoder reranker
-- LLM provider router (Groq free → OpenAI → Anthropic → Ollama)
-- Langfuse tracing
+Security & reliability layers:
+- Input guardrails: sanitize, injection detection, rate limiting
+- Upload security: magic bytes, size caps, document sanitization
+- Output guardrails: PII redaction, leakage detection, unsafe filter
+- Resilience: retries, circuit breaker, safe fallbacks
 
 Usage:
     streamlit run app.py
@@ -17,7 +17,6 @@ Usage:
 from typing import List, Dict
 import logging
 import os
-import tempfile
 
 import streamlit as st
 
@@ -30,6 +29,25 @@ from src.reranker import CrossEncoderReranker
 from src.cache import SemanticCache
 from src.tracing import Tracer
 from src.evaluation import compute_faithfulness, compute_relevance
+from src.input_guardrails import (
+    sanitize_input,
+    detect_injection,
+    validate_query,
+    RateLimiter,
+)
+from src.output_guardrails import filter_output
+from src.upload_security import (
+    validate_upload,
+    sanitize_document_text,
+    safe_page_count,
+    create_secure_temp_file,
+)
+from src.resilience import (
+    safe_llm_call,
+    empty_answer_fallback,
+    ErrorBucket,
+    CircuitBreaker,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -72,18 +90,56 @@ def init_state():
         st.session_state.rerank_on = True
     if "cache_on" not in st.session_state:
         st.session_state.cache_on = True
+    if "rate_limiter" not in st.session_state:
+        st.session_state.rate_limiter = RateLimiter()
+    if "llm_breaker" not in st.session_state:
+        st.session_state.llm_breaker = CircuitBreaker(
+            failure_threshold=3, reset_timeout=60.0
+        )
+    if "session_id" not in st.session_state:
+        import uuid
+        st.session_state.session_id = str(uuid.uuid4())[:8]
+    if "last_blocked" not in st.session_state:
+        st.session_state.last_blocked = None
 
 
 def process_upload(uploaded):
-    """Extract → chunk → embed → index. Returns summary strings."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(uploaded.read())
-        tmp_path = tmp.name
+    """Validate → extract → chunk → embed → index. Returns summary strings."""
+    # 1) Upload security: type/magic bytes/size validation
+    data = uploaded.read()
+    validation = validate_upload(
+        filename=uploaded.name,
+        data=data,
+        max_size_mb=20,
+    )
+    if not validation.ok:
+        return None, f"🚫 {validation.reason}"
+
+    # 2) Write to a secure temp file (0600 perms, no shell interpolation)
+    tmp_path, tmp_err = create_secure_temp_file(data, suffix=".pdf")
+    if tmp_path is None:
+        return None, f"🚫 {tmp_err or 'Failed to create secure temporary file.'}"
+
     try:
-        result = process_pdf(tmp_path)
+        # 3) Extract with page-count safety cap
+        result = process_pdf(tmp_path, max_pages=400)
         children, parents = result["children"], result["parents"]
         if not children:
             return None, "No extractable text found in this PDF."
+
+        # 4) Sanitize every chunk (hidden text / script / path injection)
+        sanitized = 0
+        for chunk in children:
+            cleaned = sanitize_document_text(chunk["text"])
+            if cleaned != chunk["text"]:
+                chunk["text"] = cleaned
+                sanitized += 1
+        for parent in parents:
+            parent["text"] = sanitize_document_text(parent["text"])
+        logger.info(
+            "Upload: %s sanitized=%d pages=%d children=%d",
+            uploaded.name, sanitized, result["total_pages"], len(children),
+        )
 
         st.session_state.parents = {p["parent_id"]: p for p in parents}
 
@@ -145,52 +201,115 @@ def run_query(question: str):
     tracer = st.session_state.tracer
     emb = st.session_state.embedding_manager.embed_query(question)
     cache = st.session_state.cache
+    errors = ErrorBucket()
 
-    # 1) Semantic cache
+    # 1) Input guardrails: sanitize → validate → injection scan → rate limit
+    clean = sanitize_input(question)
+    if not validate_query(clean)[0]:
+        st.session_state.last_blocked = "empty-after-sanitize"
+        return {
+            "answer": "⚠️ Please ask a meaningful question (your input contained no usable text).",
+            "provider": None, "model": None,
+            "chunks": [], "context_chunks": [], "from_cache": False,
+            "blocked": "empty-after-sanitize",
+        }
+    inj = detect_injection(clean)
+    if inj.flagged:
+        st.session_state.last_blocked = inj.reason
+        logger.warning("Injection blocked [%s]: %.80s", inj.reason, clean)
+        return {
+            "answer": "🚫 That question was blocked by the input guardrail "
+                      f"({inj.reason}). If this was a mistake, rephrase it.",
+            "provider": None, "model": None,
+            "chunks": [], "context_chunks": [], "from_cache": False,
+            "blocked": inj.reason,
+        }
+    if not st.session_state.rate_limiter.allow():
+        return {
+            "answer": "⏳ Rate limit reached. Please wait a moment before asking again.",
+            "provider": None, "model": None,
+            "chunks": [], "context_chunks": [], "from_cache": False,
+            "blocked": "rate-limit",
+        }
+
+    # 2) Semantic cache
     if st.session_state.cache_on:
-        hit = cache.get(question, emb)
+        hit = cache.get(clean, emb)
         if hit["hit"]:
-            tracer.trace("cache", query=question, similarity=hit["similarity"])
+            tracer.trace("cache", query=clean, similarity=hit["similarity"])
             return {**hit, "chunks": [], "from_cache": True}
 
-    # 2) Hybrid retrieve (BM25 + dense, RRF)
-    candidates = st.session_state.hybrid.retrieve(question, top_k=RETRIEVE_N)
+    # 3) Hybrid retrieve (BM25 + dense, RRF)
+    candidates = st.session_state.hybrid.retrieve(clean, top_k=RETRIEVE_N)
 
-    # 3) Rerank (cross-encoder)
+    # 4) Rerank (cross-encoder)
     if st.session_state.rerank_on:
-        top = st.session_state.reranker.rerank(question, candidates, top_k=TOP_K)
+        top = st.session_state.reranker.rerank(clean, candidates, top_k=TOP_K)
     else:
         top = candidates[:TOP_K]
 
-    # 4) Small-to-big: resolve parents for generation context
+    # 5) Small-to-big: resolve parents for generation context
     context_chunks = resolve_parents(top)
 
-    # 5) Grounded generation
-    answer, provider, model = st.session_state.generator.generate_response(
-        question, context_chunks, stream=False
-    )
+    # 6) Grounded generation (with circuit breaker + safe fallback)
+    breaker = st.session_state.llm_breaker
+    if breaker.is_open():
+        errors.add("LLM circuit open — using fallback response")
+        answer, provider, model = empty_answer_fallback(
+            clean, len(context_chunks), reason="circuit-open"
+        )
+    else:
+        try:
+            answer, provider, model = safe_llm_call(
+                st.session_state.generator.generate_response,
+                question=clean,
+                chunks=context_chunks,
+                stream=False,
+            )
+            breaker.record_success()
+        except Exception as e:
+            breaker.record_failure()
+            errors.add(f"LLM call failed ({e})")
+            answer, provider, model = empty_answer_fallback(
+                clean, len(context_chunks), reason="llm-error"
+            )
+
+    # 7) Output guardrails: filter the answer before it reaches the user
+    filtered = filter_output(answer)
+    if filtered.pii_redacted or filtered.leakage_detected or filtered.unsafe_detected:
+        tracer.trace(
+            "output_guardrail",
+            pii=filtered.pii_redacted,
+            leakage=filtered.leakage_detected,
+            unsafe=filtered.unsafe_detected,
+        )
+    final_answer = filtered.text
 
     tracer.trace(
         "qa",
-        query=question,
+        query=clean,
         candidates=len(candidates),
         reranked=len(top),
         provider=provider,
         model=model,
-        grounding=check_grounding(answer, context_chunks),
+        grounding=check_grounding(final_answer, context_chunks),
+        errors=errors.summarize(),
     )
 
-    # 6) Cache the answer (if enabled and a real LLM answered)
-    if st.session_state.cache_on and provider != "rule-based":
-        cache.put(question, emb, answer, provider)
+    # 8) Cache the answer (if enabled and a real LLM answered)
+    if st.session_state.cache_on and provider != "rule-based" \
+            and not filtered.pii_redacted and not filtered.unsafe_detected:
+        cache.put(clean, emb, final_answer, provider)
 
     return {
-        "answer": answer,
+        "answer": final_answer,
         "provider": provider,
         "model": model,
         "chunks": top,
         "context_chunks": context_chunks,
         "from_cache": False,
+        "errors": errors.summarize(),
+        "redaction": filtered.pii_redacted,
     }
 
 
@@ -206,7 +325,9 @@ def render_sidebar():
             st.warning("🔴 No LLM provider. Add keys below or start Ollama.")
 
         with st.expander("🔑 API Keys", expanded=not providers):
-            keys = {"GROQ_API_KEY": "Groq (free)", "OPENAI_API_KEY": "OpenAI",
+            keys = {"GROQ_API_KEY": "Groq (free)",
+                    "GEMINI_API_KEY": "Gemini (free)",
+                    "OPENAI_API_KEY": "OpenAI",
                     "ANTHROPIC_API_KEY": "Anthropic"}
             for env, label in keys.items():
                 current = os.getenv(env, "")
@@ -280,7 +401,18 @@ def render_qa():
     st.subheader("🤖 Answer")
     if result.get("from_cache"):
         st.caption("⚡ Answered from semantic cache (no LLM call)")
+    if result.get("blocked"):
+        st.warning(result["answer"])
+        return
     st.write(result["answer"])
+
+    # Redaction notice (output guardrail)
+    if result.get("redaction"):
+        st.info("🛡️ Sensitive content (e.g., emails/phones) was redacted from this answer.")
+
+    # Resilience errors
+    if result.get("errors"):
+        st.caption("🔄 " + "; ".join(result["errors"]))
 
     # Grounding badge
     g = check_grounding(result["answer"], result["context_chunks"])
