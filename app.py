@@ -1,12 +1,15 @@
 """
 Intelligent Document Q&A System with Retrieval-Augmented Generation (RAG).
 
-A Streamlit web application that:
-1. Accepts PDF uploads
-2. Processes and chunks documents
-3. Generates semantic embeddings
-4. Indexes into a vector database (ChromaDB)
-5. Provides grounded answers with explicit citations
+Pipeline: PDF upload → pypdf extraction → parent-child chunking →
+MiniLM embeddings → ChromaDB → hybrid search (BM25+RRF) →
+cross-encoder rerank → grounded LLM (router) → cited answer.
+
+Additive optimizations (all optional, all degrade gracefully):
+- Semantic cache (SQLite, embedding-based)
+- Cross-encoder reranker
+- LLM provider router (Groq free → OpenAI → Anthropic → Ollama)
+- Langfuse tracing
 
 Usage:
     streamlit run app.py
@@ -18,290 +21,333 @@ import tempfile
 
 import streamlit as st
 
-from src.pdf_utils import process_pdf, count_tokens
-from src.embeddings import (
-    EmbeddingManager,
-    ChromaVectorStore,
-)
-from src.llm import GroundedGenerator
+from src.pdf_utils import process_pdf
+from src.embeddings import EmbeddingManager, ChromaVectorStore
+from src.llm import GroundedGenerator, check_grounding
+from src.llm_router import LLMRouter
 from src.hybrid_search import HybridRetriever
+from src.reranker import CrossEncoderReranker
+from src.cache import SemanticCache
+from src.tracing import Tracer
 from src.evaluation import compute_faithfulness, compute_relevance
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# App configuration
 st.set_page_config(
     page_title="DocuQA - RAG System",
     page_icon="📄",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# Constants
 TOP_K = 4
-MAX_QUERY_HISTORY = 10
+RETRIEVE_N = TOP_K * 2  # fetch more, then rerank down
 
 
-def initialize_session_state():
-    """Initialize session state variables."""
-    if "vector_store" not in st.session_state:
-        st.session_state.vector_store = None
+def init_state():
+    """Initialize session state."""
     if "embedding_manager" not in st.session_state:
         st.session_state.embedding_manager = EmbeddingManager()
+    if "router" not in st.session_state:
+        st.session_state.router = LLMRouter()
     if "generator" not in st.session_state:
-        st.session_state.generator = GroundedGenerator(
-            api_key=os.getenv("OPENAI_API_KEY")
-        )
-    if "hybrid_retriever" not in st.session_state:
-        st.session_state.hybrid_retriever = None
+        st.session_state.generator = GroundedGenerator(st.session_state.router)
+    if "vector_store" not in st.session_state:
+        st.session_state.vector_store = None
+    if "hybrid" not in st.session_state:
+        st.session_state.hybrid = None
+    if "reranker" not in st.session_state:
+        st.session_state.reranker = CrossEncoderReranker()
+    if "cache" not in st.session_state:
+        st.session_state.cache = SemanticCache()
+    if "tracer" not in st.session_state:
+        st.session_state.tracer = Tracer()
+    if "parents" not in st.session_state:
+        st.session_state.parents = {}
     if "is_indexed" not in st.session_state:
         st.session_state.is_indexed = False
-    if "chunks" not in st.session_state:
-        st.session_state.chunks = []
-    if "query_history" not in st.session_state:
-        st.session_state.query_history = []
+    if "history" not in st.session_state:
+        st.session_state.history = []
+    if "rerank_on" not in st.session_state:
+        st.session_state.rerank_on = True
+    if "cache_on" not in st.session_state:
+        st.session_state.cache_on = True
 
 
-def display_citation_legend():
-    """Display citation format legend."""
-    with st.expander("📖 Citation Legend", expanded=False):
-        st.markdown("""
-        **Citation Format:** `[Page X, Chunk Y]`
-        - **Page X**: The page number in the original PDF (1-indexed)
-        - **Chunk Y**: The semantic chunk number within the entire document
-
-        Answers are grounded only on the provided document. If information cannot be
-        derived from the document, the system responds with:
-        *"Information not found in the provided document."*
-        """)
-
-
-def handle_pdf_upload():
-    """Handle PDF file upload and processing."""
-    uploaded_file = st.file_uploader(
-        "📤 Upload a PDF document",
-        type=["pdf"],
-        help="Supports multi-page PDFs, research papers, technical manuals, etc.",
-    )
-
-    if uploaded_file is None:
-        return
-
-    # Save to temporary file
+def process_upload(uploaded):
+    """Extract → chunk → embed → index. Returns summary strings."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(uploaded_file.read())
+        tmp.write(uploaded.read())
         tmp_path = tmp.name
-
     try:
-        with st.spinner("Processing PDF..."):
-            # Extract text and chunk
-            st.session_state.chunks = process_pdf(tmp_path)
+        result = process_pdf(tmp_path)
+        children, parents = result["children"], result["parents"]
+        if not children:
+            return None, "No extractable text found in this PDF."
 
-            if not st.session_state.chunks:
-                st.error("❌ No text could be extracted from the PDF.")
-                return
+        st.session_state.parents = {p["parent_id"]: p for p in parents}
 
-            # Initialize vector store
-            st.session_state.vector_store = ChromaVectorStore(
-                persist_dir="./chroma_db",
-                embedding_manager=st.session_state.embedding_manager,
-            )
+        vs = ChromaVectorStore(
+            persist_dir="./chroma_db",
+            embedding_manager=st.session_state.embedding_manager,
+        )
+        vs.add_chunks(children)
 
-            # Index chunks
-            with st.spinner("Generating embeddings and indexing..."):
-                st.session_state.vector_store.add_chunks(st.session_state.chunks)
-                st.session_state.is_indexed = True
+        hybrid = HybridRetriever(vs)
+        hybrid.index_bm25(children)
 
-            # Build hybrid retriever
-            st.session_state.hybrid_retriever = HybridRetriever(
-                vector_store=st.session_state.vector_store
-            )
-            st.session_state.hybrid_retriever.index_bm25(st.session_state.chunks)
+        st.session_state.vector_store = vs
+        st.session_state.hybrid = hybrid
+        st.session_state.is_indexed = True
 
-            # Display summary
-            total_tokens = sum(c["tokens"] for c in st.session_state.chunks)
-            st.success(
-                f"✅ **Document processed successfully!**\n\n"
-                f"- Total pages: {len({c['page'] for c in st.session_state.chunks})}\n"
-                f"- Total chunks: {len(st.session_state.chunks)}\n"
-                f"- Total tokens: {total_tokens:,}"
-            )
+        st.session_state.tracer.trace(
+            "ingest",
+            pages=result["total_pages"],
+            children=len(children),
+            parents=len(parents),
+        )
 
+        n_pages = len({c["page"] for c in children})
+        return f"✅ {n_pages} pages → {len(children)} chunks indexed", None
     except Exception as e:
-        st.error(f"❌ Error processing PDF: {str(e)}")
-        logger.error(f"PDF processing error: {e}")
+        logger.error(f"Ingest error: {e}")
+        return None, f"Error processing PDF: {e}"
     finally:
-        # Clean up temporary file
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
 
-def display_retrieved_context(chunks: List[Dict]):
-    """Display retrieved context chunks in an expandable view."""
-    with st.expander(f"📚 Retrieved Context Chunks ({len(chunks)})", expanded=False):
-        for chunk in chunks:
-            with st.container():
-                st.markdown(f"**Page {chunk['page']}, Chunk {chunk['chunk_id']}**")
-                st.markdown(f"*Relevance: {chunk.get('similarity', 0):.2f}*")
-                # Show excerpt in expander
-                with st.expander("Show text"):
-                    st.write(chunk["text"])
+def resolve_parents(children: List[Dict]) -> List[Dict]:
+    """
+    Small-to-big: map retrieved children back to their parent sections.
+    Context for the LLM uses parent text; citations keep the child's
+    page + chunk id for precision. Dedupe by parent_id.
+    """
+    seen, context = set(), []
+    for child in children:
+        pid = child.get("parent_id")
+        if pid in seen:
+            continue
+        seen.add(pid)
+        parent = st.session_state.parents.get(pid, {})
+        text = parent.get("text", child["text"])
+        context.append({
+            "text": text,
+            "page": child["page"],
+            "chunk_id": child["chunk_id"],
+            "parent_id": pid,
+        })
+    return context
+
+
+def run_query(question: str):
+    """Full query pipeline. Returns dict with answer + diagnostics."""
+    tracer = st.session_state.tracer
+    emb = st.session_state.embedding_manager.embed_query(question)
+    cache = st.session_state.cache
+
+    # 1) Semantic cache
+    if st.session_state.cache_on:
+        hit = cache.get(question, emb)
+        if hit["hit"]:
+            tracer.trace("cache", query=question, similarity=hit["similarity"])
+            return {**hit, "chunks": [], "from_cache": True}
+
+    # 2) Hybrid retrieve (BM25 + dense, RRF)
+    candidates = st.session_state.hybrid.retrieve(question, top_k=RETRIEVE_N)
+
+    # 3) Rerank (cross-encoder)
+    if st.session_state.rerank_on:
+        top = st.session_state.reranker.rerank(question, candidates, top_k=TOP_K)
+    else:
+        top = candidates[:TOP_K]
+
+    # 4) Small-to-big: resolve parents for generation context
+    context_chunks = resolve_parents(top)
+
+    # 5) Grounded generation
+    answer, provider, model = st.session_state.generator.generate_response(
+        question, context_chunks, stream=False
+    )
+
+    tracer.trace(
+        "qa",
+        query=question,
+        candidates=len(candidates),
+        reranked=len(top),
+        provider=provider,
+        model=model,
+        grounding=check_grounding(answer, context_chunks),
+    )
+
+    # 6) Cache the answer (if enabled and a real LLM answered)
+    if st.session_state.cache_on and provider != "rule-based":
+        cache.put(question, emb, answer, provider)
+
+    return {
+        "answer": answer,
+        "provider": provider,
+        "model": model,
+        "chunks": top,
+        "context_chunks": context_chunks,
+        "from_cache": False,
+    }
+
+
+def render_sidebar():
+    """Sidebar: provider status, API keys, toggles."""
+    with st.sidebar:
+        st.title("⚙️ Settings")
+
+        providers = st.session_state.router.available_providers()
+        if providers:
+            st.success(f"🟢 Active: {', '.join(providers)}")
+        else:
+            st.warning("🔴 No LLM provider. Add keys below or start Ollama.")
+
+        with st.expander("🔑 API Keys", expanded=not providers):
+            keys = {"GROQ_API_KEY": "Groq (free)", "OPENAI_API_KEY": "OpenAI",
+                    "ANTHROPIC_API_KEY": "Anthropic"}
+            for env, label in keys.items():
+                current = os.getenv(env, "")
+                val = st.text_input(label, value=current, type="password", key=env)
+                if val and val != current:
+                    os.environ[env] = val
+                    st.rerun()
+            if st.button("💾 Reload router"):
+                st.session_state.router = LLMRouter()
+                st.session_state.generator = GroundedGenerator(st.session_state.router)
+                st.rerun()
+
+        st.markdown("---")
+        st.subheader("🧪 Retrieval Options")
+        st.session_state.rerank_on = st.toggle(
+            "Cross-encoder rerank", value=st.session_state.rerank_on,
+            help="Better precision; downloads ~90MB model once")
+        st.session_state.cache_on = st.toggle(
+            "Semantic cache", value=st.session_state.cache_on,
+            help="Reuse answers for similar questions (~80% cost cut)")
+
+        with st.expander("🧊 Cache info"):
+            st.write(f"Entries: {st.session_state.cache.size()}")
+            if st.button("Clear cache"):
+                st.session_state.cache.clear()
+                st.rerun()
+
+        st.markdown("---")
+        if st.button("🔄 Reset session"):
+            st.session_state.clear()
+            st.rerun()
+
+
+def render_upload():
+    """PDF upload + ingest."""
+    uploaded = st.file_uploader("📤 Upload a PDF", type=["pdf"])
+    if uploaded is not None:
+        msg, err = process_upload(uploaded)
+        if err:
+            st.error(err)
+        elif msg:
+            st.success(msg)
+
+
+def render_chunks(chunks: List[Dict], title: str):
+    """Collapsible view of retrieved chunks."""
+    with st.expander(f"📚 {title} ({len(chunks)})", expanded=False):
+        for c in chunks:
+            score = c.get("rerank_score", c.get("similarity", 0))
+            st.markdown(
+                f"**Page {c['page']} · Chunk {c['chunk_id']}** "
+                f"`score={score:.3f}`"
+            )
+            st.write(c["text"])
             st.divider()
 
 
-def handle_query():
-    """Handle user query and generate response."""
+def render_qa():
+    """Question input + answer pipeline."""
     question = st.text_input(
         "❓ Ask a question about the document",
-        placeholder="e.g., What are the key findings? What does the system architecture look like?",
-        key="question_input",
+        placeholder="e.g., What are the key findings?",
     )
-
     if not question:
         return
 
-    if not st.session_state.is_indexed:
-        st.warning("Please upload a PDF document first.")
-        return
+    with st.spinner("Retrieving & generating..."):
+        result = run_query(question)
 
-    # Retrieve relevant chunks (using hybrid search if available)
-    with st.spinner("Retrieving relevant content..."):
-        if st.session_state.hybrid_retriever:
-            retrieved_chunks = st.session_state.hybrid_retriever.retrieve(
-                question, top_k=TOP_K
-            )
-        else:
-            retrieved_chunks = st.session_state.vector_store.retrieve(
-                question, top_k=TOP_K
-            )
+    # Answer
+    st.subheader("🤖 Answer")
+    if result.get("from_cache"):
+        st.caption("⚡ Answered from semantic cache (no LLM call)")
+    st.write(result["answer"])
 
-    # Display retrieved context
-    display_retrieved_context(retrieved_chunks)
+    # Grounding badge
+    g = check_grounding(result["answer"], result["context_chunks"])
+    if g["grounded"]:
+        st.success(f"🛡️ {g['reason']}")
+    else:
+        st.warning(f"⚠️ {g['reason']}")
 
-    # Generate grounded answer
-    with st.spinner("Generating answer..."):
-        response = st.session_state.generator.generate_response(
-            question=question,
-            chunks=retrieved_chunks,
-            stream=True,
+    # Provider badge
+    if result["provider"] != "rule-based":
+        st.caption(
+            f"⚡ Provider: **{result['provider']}** · Model: `{result['model']}`"
         )
 
-    # Handle streaming or non-streaming response
-    if hasattr(response, "__iter__"):
-        # Streaming response
-        answer_placeholder = st.empty()
-        full_answer = ""
-        for chunk in response:
-            if hasattr(chunk, "choices"):
-                # OpenAI streaming response
-                content = chunk.choices[0].delta.content or ""
-            else:
-                # Other response formats
-                content = str(chunk)
-            full_answer += content
-            answer_placeholder.markdown(full_answer)
-        answer = full_answer
-    else:
-        answer = response
-
-    # Display answer
-    st.subheader("🤖 Answer")
-    st.markdown(f"**{answer}**")
-
-    # Compute and display evaluation metrics
+    # Metrics
     with st.expander("📊 Evaluation Metrics"):
-        faithfulness = compute_faithfulness(answer, retrieved_chunks)
-        relevance = compute_relevance(question, retrieved_chunks)
-        st.metric("Faithfulness", f"{faithfulness:.2f}")
-        st.metric("Relevance", f"{relevance:.2f}")
+        c1, c2 = st.columns(2)
+        c1.metric("Faithfulness",
+                  f"{compute_faithfulness(result['answer'], result['context_chunks']):.2f}")
+        c2.metric("Relevance",
+                  f"{compute_relevance(question, result['chunks']):.2f}")
 
-    # Save to query history
-    st.session_state.query_history.append({
+    # Retrieved chunks (children used for retrieval)
+    if result["chunks"]:
+        render_chunks(result["chunks"], "Retrieved Context Chunks")
+    if result["context_chunks"]:
+        render_chunks(result["context_chunks"], "Context Sent to LLM (parents)")
+
+    st.session_state.history.append({
         "question": question,
-        "answer": answer,
-        "retrieved_chunks": len(retrieved_chunks),
+        "answer": result["answer"][:300],
     })
 
 
-def display_query_history():
-    """Display the query history."""
-    history = st.session_state.get("query_history", [])
-    if not history:
+def render_history():
+    if not st.session_state.history:
         return
-
-    with st.expander(f"🕒 Query History ({len(history)})", expanded=False):
-        for i, entry in enumerate(reversed(history[-5:]), 1):
-            with st.container():
-                st.markdown(f"**Q{i}:** {entry['question']}")
-                st.markdown(f"**A{i}:** {entry['answer'][:200]}...")
-                st.caption(f"Retrieved: {entry['retrieved_chunks']} chunks")
+    with st.expander(f"🕒 History ({len(st.session_state.history)})", expanded=False):
+        for i, h in enumerate(reversed(st.session_state.history[-5:]), 1):
+            st.markdown(f"**Q{i}:** {h['question']}")
+            st.markdown(f"**A{i}:** {h['answer']}")
             st.divider()
 
 
 def main():
-    """Main application entry point."""
-    initialize_session_state()
+    init_state()
+    render_sidebar()
 
-    # Sidebar
-    with st.sidebar:
-        st.title("📚 DocuQA Settings")
-        st.markdown("---")
-
-        # API Key configuration
-        if not os.getenv("OPENAI_API_KEY"):
-            with st.form("api_settings"):
-                st.subheader("🔑 OpenAI API Key")
-                api_key = st.text_input(
-                    "Enter OpenAI API Key (optional - enables GPT models)",
-                    type="password",
-                )
-                submit_key = st.form_submit_button("Set Key")
-                if submit_key and api_key:
-                    os.environ["OPENAI_API_KEY"] = api_key
-                    st.session_state.generator = GroundedGenerator(api_key=api_key)
-                    st.success("✅ API key set!")
-
-        st.markdown("---")
-        display_citation_legend()
-
-        # Reset button
-        if st.button("🔄 Reset Session", type="secondary"):
-            st.session_state.clear()
-            st.rerun()
-
-    # Main content
     st.title("📄 Intelligent Document Q&A")
-    st.markdown("""
-    Upload a PDF document and ask questions about it. The system uses **Retrieval-Augmented 
-    Generation (RAG)** to provide answers grounded strictly in your document.
+    st.markdown(
+        "Upload a PDF, ask anything — answers are **grounded strictly in the document** "
+        "with `[Page X, Chunk Y]` citations. No LLM provider? Set a free Groq key in the sidebar."
+    )
 
-    **Features:**
-    - ✅ PDF processing with semantic chunking
-    - ✅ Vector embeddings with cosine similarity search
-    - ✅ Hybrid search (BM25 + dense retrieval)
-    - ✅ Grounded generation with explicit citations
-    - ✅ Token streaming responses
-    - ✅ Hallucination prevention
-    """)
+    render_upload()
 
-    # PDF upload section
-    handle_pdf_upload()
-
-    # Query section
     if st.session_state.is_indexed:
         st.markdown("---")
-        handle_query()
+        render_qa()
 
-    # Query history
-    display_query_history()
+    render_history()
 
-    # Footer
     st.markdown("---")
     st.markdown(
-        "<p style='text-align: center; color: #666;'>"
-        "Built with Streamlit • LangChain • ChromaDB • Sentence-Transformers"
+        "<p style='text-align:center;color:#888;font-size:12px'>"
+        "pypdf · Parent-Child Chunking · MiniLM · ChromaDB · BM25+RRF · "
+        "Cross-Encoder · Groq/OpenAI/Anthropic/Ollama · Streamlit"
         "</p>",
         unsafe_allow_html=True,
     )
