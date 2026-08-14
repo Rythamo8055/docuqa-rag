@@ -171,18 +171,27 @@ def safe_llm_call(
     return None, "none", "none", last_err
 
 
-def empty_answer_fallback(question: str, chunks_count: int) -> str:
-    """User-friendly fallback when the LLM returns nothing useful."""
+def empty_answer_fallback(question: str, chunks_count: int, reason: str = "") -> tuple[str, str, str]:
+    """User-friendly fallback when the LLM returns nothing useful.
+
+    Returns:
+        (answer_text, provider, model) — provider is always "rule-based",
+        model is always None.
+    """
     if chunks_count == 0:
         return (
             "Information not found in the provided document. "
-            "No relevant content was retrieved for this question."
+            "No relevant content was retrieved for this question.",
+            "rule-based",
+            None,
         )
     return (
         "I could not generate a complete answer for this question. "
         f"{chunks_count} relevant section(s) were retrieved, but the "
         "generation step failed. Please try rephrasing your question, "
-        "or try again in a moment."
+        "or try again in a moment.",
+        "rule-based",
+        None,
     )
 
 
@@ -283,10 +292,11 @@ if __name__ == "__main__":
     check("safe_llm: None router guarded", res is None and "not available" in err)
 
     # fallbacks
-    f0 = empty_answer_fallback("q", 0)
-    f5 = empty_answer_fallback("q", 5)
+    f0, fp0, fm0 = empty_answer_fallback("q", 0)
+    f5, fp5, fm5 = empty_answer_fallback("q", 5)
     check("fallback: zero chunks -> not-found", "not found" in f0)
     check("fallback: has chunks -> retry hint", "rephrasing" in f5)
+    check("fallback: returns rule-based provider", fp0 == "rule-based" and fm5 is None)
 
     # ErrorBucket
     eb = ErrorBucket()

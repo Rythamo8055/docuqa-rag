@@ -322,8 +322,7 @@ class RAGService:
             provider = "extractive" if ext else "rule-based"
         elif self.llm_breaker.state == "OPEN":
             errors.add("circuit-open", "LLM circuit open — using fallback response")
-            answer = empty_answer_fallback(clean, len(context_chunks))
-            provider = "rule-based"
+            answer, provider, model = empty_answer_fallback(clean, len(context_chunks))
         else:
             try:
                 answer, provider, model = self.llm_breaker.call(
@@ -332,13 +331,11 @@ class RAGService:
                 )
             except CircuitOpenError:
                 errors.add("circuit-open", "LLM circuit open — using fallback response")
-                answer = empty_answer_fallback(clean, len(context_chunks))
-                provider = "rule-based"
+                answer, provider, model = empty_answer_fallback(clean, len(context_chunks))
             except Exception as e:
                 self.stats["llm_failures"] += 1
                 errors.add("llm-error", f"LLM call failed ({e})")
-                answer = empty_answer_fallback(clean, len(context_chunks))
-                provider = "rule-based"
+                answer, provider, model = empty_answer_fallback(clean, len(context_chunks))
 
         # 6.5) Refusal handling — the LLM returned the "not found" phrase
         # despite strong retrieval. This is usually a model refusal, not a

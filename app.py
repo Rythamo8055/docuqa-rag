@@ -524,7 +524,7 @@ def render_qa():
     if result.get("redaction"):
         st.info("🛡️ Sensitive content (e.g., emails/phones) was redacted from this answer.")
     if result.get("errors"):
-        st.caption("🔄 " + "; ".join(result["errors"]))
+        st.caption("🔄 " + result["errors"])
 
     # grounding badge
     g = check_grounding(result["answer"], result["context_chunks"])
