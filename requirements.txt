@@ -14,7 +14,8 @@ rank-bm25>=0.2.0           # BM25 sparse retrieval (hybrid search)
 
 # ── Optional ────────────────────────────────────────────
 # langfuse>=2.0.0          # Tracing (enabled via LANGFUSE_* env vars)
-# pytest>=7.0.0            # Run tests
+pytest>=7.0.0            # Run tests
+torchvision                # Required for transformer models on Streamlit Cloud
 
 # ── API layer ───────────────────────────────────────────
 fastapi>=0.110.0           # REST backend (api/main.py)
