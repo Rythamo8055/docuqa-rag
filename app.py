@@ -296,8 +296,7 @@ def run_query(question: str) -> dict:
             clean, len(context_chunks), reason="circuit-open")
     else:
         try:
-            answer, provider, model = safe_llm_call(
-                st.session_state.generator.generate_response,
+            answer, provider, model = st.session_state.generator.generate_response(
                 question=clean, chunks=context_chunks, stream=False)
             breaker.record_success()
         except Exception as e:
