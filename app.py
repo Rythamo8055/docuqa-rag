@@ -346,9 +346,17 @@ def render_sidebar():
                                 ("GEMINI_API_KEY", "Gemini (free)"),
                                 ("OPENAI_API_KEY", "OpenAI"),
                                 ("ANTHROPIC_API_KEY", "Anthropic")]:
-                current = os.getenv(env, "")
-                val = st.text_input(label, value=current, type="password", key=env)
-                if val and val != current:
+                has_key = bool(os.getenv(env))
+                status = "✅ configured" if has_key else "❌ not set"
+                val = st.text_input(
+                    label,
+                    value="",
+                    type="password",
+                    key=env,
+                    placeholder=status,
+                    help=f"Status: {status}. Paste a new key to update.",
+                )
+                if val:
                     os.environ[env] = val
                     st.rerun()
             if st.button("💾 Reload router"):
