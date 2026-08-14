@@ -81,17 +81,20 @@ sequenceDiagram
 |---|---|---|
 | Pass rate | **10/10 (100%)** | **27/28 (96%)** |
 | Retrieval hit-rate | **1.0** | **1.0** |
+| Context precision (Ragas) | **0.783** | **0.982** |
 | Grounded answers | 100% | 93% |
-| Faithfulness (avg) | **0.785** | — |
-| Relevance (avg) | 0.618 | — |
+| Faithfulness (avg) | **0.791** | 0.73 |
+| Relevance (avg) | 0.638 | 0.608 |
 | Prompt-injection blocked | ✅ | ✅ |
 | No-fabrication (out-of-doc) | ✅ | ✅ |
-| Latency p95 | — | 13.4 s |
+| Latency p95 | — | 12.4 s |
 | Errors | 0 | 0 |
 
 > ⚠️ Known limitation: heavy-typo queries (e.g. `storag classez prieces?`) return not-found — the extractive path needs exact token overlap. Fix: add fuzzy query expansion before retrieval.
 
-> Full reports: `evals/report.md`, `evals/stress_report.md` · Run: `python evals/run_eval.py [--llm]`, `python evals/stress_test.py`
+> Metrics are Ragas-style: faithfulness/relevance run **lexically** (deterministic, CI-friendly) or **LLM-judged** with `--judge` (`python evals/run_eval.py --judge`); context precision uses the Ragas ranking formula. The free-tier judge model currently refuses to score, so judged runs fall back to lexical — swap in any capable provider (Groq/OpenAI/Anthropic) via `.env` to activate it.
+
+> Full reports: `evals/report.md`, `evals/stress_report.md` · Run: `python evals/run_eval.py [--llm] [--judge]`, `python evals/stress_test.py`
 
 ## 🛠️ Tech Stack
 

@@ -276,6 +276,12 @@ def run(service: RAGService) -> dict:
         retrieval_hit = (
             1.0 if exp_pages and exp_pages <= pages else (0.0 if exp_pages else None)
         )
+        relevant = [i for i, c in enumerate(returned)
+                    if c.get("page") in exp_pages]
+        prec = (
+            sum(sum(1 for j in relevant if j <= i) / (i + 1) for i in relevant)
+            / len(relevant)
+        ) if relevant else (0.0 if exp_pages else 1.0)
         context = " ".join(c.get("text", "") for c in returned)
 
         tc = term_coverage(answer, case.get("expected_terms", []))
@@ -302,7 +308,8 @@ def run(service: RAGService) -> dict:
         results.append({
             "id": case["id"], "category": case["category"], "question": q,
             "pass": bool(pass_), "blocked": blocked, "grounded": grounded,
-            "retrieval_hit": retrieval_hit, "pages_returned": sorted(pages),
+            "retrieval_hit": retrieval_hit, "context_precision": round(prec, 3),
+            "pages_returned": sorted(pages),
             "term_coverage": round(tc, 3), "faithfulness": round(faith, 3),
             "relevance": round(rel, 3), "provider": provider,
             "answer_excerpt": (answer[:200] + "...") if answer else "",
@@ -312,6 +319,7 @@ def run(service: RAGService) -> dict:
     n = len(results)
     passed = sum(1 for r in results if r["pass"])
     hits = [r["retrieval_hit"] for r in results if r["retrieval_hit"] is not None]
+    precs = [r["context_precision"] for r in results]
     faiths = [r["faithfulness"] for r in results]
     rels = [r["relevance"] for r in results]
     lat = sorted(latencies)
@@ -321,6 +329,7 @@ def run(service: RAGService) -> dict:
             "total_cases": n, "passed": passed,
             "pass_rate": round(passed / n, 3) if n else 0.0,
             "retrieval_hit_rate": round(sum(hits) / len(hits), 3) if hits else None,
+            "avg_context_precision": round(sum(precs) / len(precs), 3) if precs else 0.0,
             "avg_faithfulness": round(sum(faiths) / len(faiths), 3) if faiths else 0.0,
             "avg_relevance": round(sum(rels) / len(rels), 3) if rels else 0.0,
             "grounded_share": round(
@@ -343,20 +352,21 @@ def render_report(out: dict) -> str:
         f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Document: `data/acme_manual.pdf` ({len(SECTIONS)} pages)",
         f"- Cases: {s['total_cases']} | Passed: **{s['passed']}/{s['total_cases']}** ({s['pass_rate']:.0%})",
-        f"- Retrieval hit-rate: **{s['retrieval_hit_rate']}**",
+        f"- Retrieval hit-rate: **{s['retrieval_hit_rate']}** | Context precision: **{s['avg_context_precision']}**",
         f"- Grounded answers: **{s['grounded_share']:.0%}** | Error rate: **{s['error_rate']}**",
         f"- Avg faithfulness: **{s['avg_faithfulness']}** | Avg relevance: **{s['avg_relevance']}**",
         f"- Latency: p50 {s['latency_p50_s']}s - p95 {s['latency_p95_s']}s - max {s['latency_max_s']}s",
         f"- Provider mix: {json.dumps(s['provider_mix'])}",
         "",
-        "| ID | Category | Pass | Grounded | Pages | Term cov | Faith | Rel | Provider |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| ID | Category | Pass | Grounded | Pages | Term cov | Faith | Rel | CtxPrec | Provider |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in out["results"]:
         lines.append(
             f"| {r['id']} | {r['category']} | {'PASS' if r['pass'] else 'FAIL'} "
             f"| {r['grounded']} | {r['pages_returned']} | {r['term_coverage']} "
-            f"| {r['faithfulness']} | {r['relevance']} | {r['provider']} |"
+            f"| {r['faithfulness']} | {r['relevance']} | {r['context_precision']} "
+            f"| {r['provider']} |"
         )
     lines += ["", "## Details"]
     for r in out["results"]:

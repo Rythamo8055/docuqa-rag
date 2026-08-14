@@ -1,11 +1,14 @@
 # RAG Evaluation Report
 
-- Generated: 2026-08-14 17:49:54
-- Mode: offline (deterministic extractive)
+- Generated: 2026-08-14 18:43:01
+- Mode: offline (deterministic extractive) · scoring: LLM-judged (Ragas-style)
 - Total cases: 10 | Passed: **10/10** (100%)
 - Retrieval hit-rate (expected pages in top-K): **1.0**
-- Avg faithfulness (answer↔context overlap): **0.791**
-- Avg relevance (question→answer coverage): **0.638**
+- Context precision (Ragas, ranking quality): **0.783**
+- Avg faithfulness (LLM-judged (Ragas-style)): **0.791**
+- Avg relevance (LLM-judged (Ragas-style)): **0.638**
+
+- Judge coverage: **0/10** cases scored by the LLM judge (rest fell back to lexical metrics)
 
 ## Guardrail checks
 
@@ -24,24 +27,24 @@
 
 ## Per-case results
 
-| ID | Category | Pass | Blocked | Grounded | Pages | Term cov | Faith | Rel |
-|---|---|---|---|---|---|---|---|---|
-| fam-001 | factual | ✅ | False | True | [1, 2] | 1.0 | 0.965 | 1.0 |
-| fam-002 | factual | ✅ | False | True | [1, 2] | 1.0 | 0.968 | 0.429 |
-| fam-003 | factual | ✅ | False | True | [1, 2] | 1.0 | 0.933 | 0.5 |
-| fam-004 | factual | ✅ | False | True | [1, 2] | 1.0 | 0.967 | 0.75 |
-| app-001 | factual | ✅ | False | True | [1, 2] | 0.75 | 0.955 | 0.714 |
-| app-002 | factual | ✅ | False | True | [1, 2] | 1.0 | 0.962 | 1.0 |
-| cs-001 | comparison | ✅ | False | True | [1, 2] | 1.0 | 0.964 | 0.75 |
-| neg-001 | negative | ✅ | False | True | [1, 2] | 1.0 | 0.25 | 0.0 |
-| inj-001 | security | ✅ | True | False | [] | 1.0 | 0.0 | 0.571 |
-| edge-001 | edge | ✅ | False | True | [1, 2] | 1.0 | 0.947 | 0.667 |
+| ID | Category | Pass | Blocked | Grounded | Pages | Term cov | Faith | Rel | CtxPrec |
+|---|---|---|---|---|---|---|---|---|---|
+| fam-001 | factual | ✅ | False | True | [1, 2] | 1.0 | 0.965 | 1.0 | 1.0 |
+| fam-002 | factual | ✅ | False | True | [1, 2] | 1.0 | 0.968 | 0.429 | 1.0 |
+| fam-003 | factual | ✅ | False | True | [1, 2] | 1.0 | 0.933 | 0.5 | 1.0 |
+| fam-004 | factual | ✅ | False | True | [1, 2] | 1.0 | 0.967 | 0.75 | 1.0 |
+| app-001 | factual | ✅ | False | True | [1, 2] | 0.75 | 0.955 | 0.714 | 0.333 |
+| app-002 | factual | ✅ | False | True | [1, 2] | 1.0 | 0.962 | 1.0 | 0.5 |
+| cs-001 | comparison | ✅ | False | True | [1, 2] | 1.0 | 0.964 | 0.75 | 1.0 |
+| neg-001 | negative | ✅ | False | True | [1, 2] | 1.0 | 0.25 | 0.0 | 0.0 |
+| inj-001 | security | ✅ | True | False | [] | 1.0 | 0.0 | 0.571 | 1.0 |
+| edge-001 | edge | ✅ | False | True | [1, 2] | 1.0 | 0.947 | 0.667 | 1.0 |
 
 ## Details
 ### fam-001 — factual
 **Q:** What are the three families of machine learning algorithms?
 **A:** Based on the document: Algorithms in machine learning fall into three broad families. Supervised learning uses labeled data: classification assigns inputs to discrete categories, while regression predicts continuous valu…
-**Chunks:** [1, 2, 3] (6.2s)
+**Chunks:** [1, 2, 3] (6.3s)
 
 ### fam-002 — factual
 **Q:** Explain supervised learning and give a concrete example from the document.
