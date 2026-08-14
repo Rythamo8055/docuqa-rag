@@ -1,10 +1,10 @@
-# 📄 DocuQA — RAG Document Q&A
+# 🧠 Nexara AI — RAG Document Q&A
 
 > **Upload a PDF → ask questions → grounded answers with `[Page X, Chunk Y]` citations. No hallucinations, guaranteed fallback.**
 
 ## 🚀 Live Demo
 
-**→ [your-app.streamlit.app](https://your-app.streamlit.app)** _(replace with deployed URL)_
+**→ [nexaraium.streamlit.app](https://nexaraium.streamlit.app)**
 
 | Quick links | |
 |---|---|
