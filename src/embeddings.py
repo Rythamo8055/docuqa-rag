@@ -107,6 +107,7 @@ class ChromaVectorStore:
             {
                 "page": chunk["page"],
                 "chunk_id": chunk["chunk_id"],
+                "parent_id": chunk.get("parent_id", 0),
                 "tokens": chunk.get("tokens", 0),
             }
             for chunk in chunks
@@ -155,6 +156,7 @@ class ChromaVectorStore:
                 "text": doc,
                 "page": meta["page"],
                 "chunk_id": meta["chunk_id"],
+                "parent_id": meta.get("parent_id", 0),
                 "tokens": meta.get("tokens", 0),
                 "similarity": round(similarity, 4),
                 "distance": round(dist, 4),
