@@ -264,7 +264,7 @@ def run_query(question: str) -> dict:
                 "provider": None, "model": None,
                 "chunks": [], "context_chunks": [], "from_cache": False,
                 "blocked": inj.reason}
-    if not st.session_state.rate_limiter.allow():
+    if not st.session_state.rate_limiter.allow(st.session_state.session_id):
         return {"answer": "⏳ Rate limit reached. Wait a moment.",
                 "provider": None, "model": None,
                 "chunks": [], "context_chunks": [], "from_cache": False,
