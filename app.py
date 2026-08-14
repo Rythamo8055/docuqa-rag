@@ -317,7 +317,7 @@ def run_query(question: str) -> dict:
     tracer.trace("qa", query=clean, candidates=len(candidates),
                  reranked=len(top), provider=provider, model=model,
                  grounding=check_grounding(final_answer, context_chunks),
-                 errors=errors.summarize())
+                 errors=errors.summary())
 
     if st.session_state.cache_on and provider != "rule-based" \
             and not filtered.pii_redacted and not filtered.unsafe_detected:
@@ -325,7 +325,7 @@ def run_query(question: str) -> dict:
 
     return {"answer": final_answer, "provider": provider, "model": model,
             "chunks": top, "context_chunks": context_chunks,
-            "from_cache": False, "errors": errors.summarize(),
+            "from_cache": False, "errors": errors.summary(),
             "redaction": filtered.pii_redacted}
 
 
