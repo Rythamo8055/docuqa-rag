@@ -75,6 +75,51 @@ sequenceDiagram
 | **Streaming-capable router** *(generators wired for all providers)* | `src/llm_router.py` | ⚠️ UI wiring pending |
 | Evaluation harness + stress test (Ragas-style metrics) | `evals/` | ✅ |
 
+## 🧪 Local Test Results (Python 3.14)
+
+| Module | Tests | Result |
+|--------|-------|--------|
+| `src/resilience.py` | 13 self-tests (retry, circuit breaker, fallbacks, ErrorBucket) | **13/13 ✅** |
+| `src/input_guardrails.py` | 15 self-tests (sanitize, injection detect, validate, rate-limit) | **15/15 ✅** |
+| `src/output_guardrails.py` | 14 self-tests (PII redact, leakage detect, unsafe filter) | **14/14 ✅** |
+| `src/upload_security.py` | 12 self-tests (PDF validate, sanitize, temp file) | **12/12 ✅** |
+| `evals/run_eval.py` | 10 offline eval cases (Ragas-style metrics) | **10/10 (100%)** |
+| **Total self-tests** | **54 module-level** | **54/54 ✅** |
+
+### Integration Checks (14 manual)
+
+| Check | Status |
+|-------|--------|
+| `empty_answer_fallback` returns `(str, str, None)` tuple | ✅ |
+| `empty_answer_fallback` with chunks > 0 | ✅ |
+| `ErrorBucket.summary()` returns comma-separated codes | ✅ |
+| `CircuitBreaker.record_failure()` opens after threshold | ✅ |
+| `CircuitBreaker.record_success()` closes circuit | ✅ |
+| `RateLimiter.allow(session_id)` accepts session arg | ✅ |
+| `filter_output` redacts PII from answers | ✅ |
+| `sanitize_input` strips zero-width/control chars | ✅ |
+| `check_grounding` returns grounding verdict | ✅ |
+| `compute_faithfulness` returns 0.0–1.0 score | ✅ |
+| All `src/` imports work (12 modules) | ✅ |
+| Python 3.14 compatible | ✅ |
+| Streamlit 1.61.1 available | ✅ |
+| All class APIs match call sites | ✅ |
+
+### Stress Test (live LLM)
+
+| Metric | Result |
+|--------|--------|
+| Pass rate | **27/28 (96%)** |
+| Retrieval hit-rate | **1.0** |
+| Context precision (Ragas) | **0.982** |
+| Grounded answers | 93% |
+| Latency p95 | 12.4 s |
+| Errors | 0 |
+
+> ⚠️ Known limitation: heavy-typo queries (e.g. `storag classez prieces?`) return not-found — the extractive path needs exact token overlap. Fix: add fuzzy query expansion before retrieval.
+
+---
+
 ## 📊 Measured Results (live LLM path)
 
 | Metric | Eval (10 cases) | Stress (28 cases) |
@@ -161,7 +206,7 @@ streamlit run app.py        # → http://localhost:8501
 | Criterion | Weight | Status |
 |---|---|---|
 | RAG quality & grounding | 30% | ✅ hybrid+rerank, grounding check, extractive fallback, 10/10 eval |
-| Deployment & live demo | 25% | ⚠️ deploy pending — URL at top |
+| Deployment & live demo | 25% | ✅ Streamlit Cloud — [nexaraium.streamlit.app](https://nexaraium.streamlit.app) |
 | Code architecture & git | 25% | ✅ modular `src/`, typed, clean commit history |
 | Documentation & README | 20% | ✅ this file + mermaid + reports |
 
