@@ -290,7 +290,7 @@ def run_query(question: str) -> dict:
 
     # ── grounded generation ──
     breaker = st.session_state.llm_breaker
-    if breaker.is_open():
+    if breaker.state == "OPEN":
         errors.add("LLM circuit open — using fallback")
         answer, provider, model = empty_answer_fallback(
             clean, len(context_chunks), reason="circuit-open")
